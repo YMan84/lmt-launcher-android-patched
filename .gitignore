@@ -1,0 +1,11 @@
+# Signing material — never commit
+keystore/
+*.jks
+*.keystore
+key.properties
+
+# Build outputs
+dist/
+*.apk
+!apktool/original/
+tmp/
