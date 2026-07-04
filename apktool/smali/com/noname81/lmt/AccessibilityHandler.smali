@@ -511,21 +511,22 @@
     return-void
 .end method
 
+.method public onUnbind(Landroid/content/Intent;)Z
+    .locals 1
+
+    const/4 v0, 0x0
+
+    sput-object v0, Lcom/noname81/lmt/AccessibilityHandler;->instance:Lcom/noname81/lmt/AccessibilityHandler;
+
+    sput-boolean v0, Lcom/noname81/lmt/AccessibilityHandler;->mInitialized:Z
+
+    return v0
+.end method
+
 .method protected onServiceConnected()V
     .locals 2
 
     .line 86
-    sget-boolean v0, Lcom/noname81/lmt/AccessibilityHandler;->mInitialized:Z
-
-    if-eqz v0, :cond_0
-
-    .line 87
-    sput-object p0, Lcom/noname81/lmt/AccessibilityHandler;->instance:Lcom/noname81/lmt/AccessibilityHandler;
-
-    return-void
-
-    .line 90
-    :cond_0
     new-instance v0, Landroid/accessibilityservice/AccessibilityServiceInfo;
 
     invoke-direct {v0}, Landroid/accessibilityservice/AccessibilityServiceInfo;-><init>()V

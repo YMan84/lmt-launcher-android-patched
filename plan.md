@@ -777,6 +777,43 @@ Resulting order:
 No resource or layout changes — pure smali instruction reorder inside one
 method. Verified on-device (Android 16): tab row reads `SETTINGS | PIE | INFO`.
 
+### 11.6 Accessibility service goes stale after ROM kill/rebind (back/recents stop working)
+
+Reported on a Honor Magic V5 (Magic UI) against both the stock `3.4 beta2`
+and the patched `3.10` build: the Back and Recent-apps actions silently
+stop working ~once a day, only recoverable by toggling LMT's accessibility
+off/on in system settings. Same class of failure occurs on Xiaomi HyperOS.
+
+`AccessibilityHandler` holds its live instance in `static instance` +
+`static mInitialized`, cleared only in `onInterrupt()`. Aggressive ROMs
+unbind the accessibility service under memory pressure **without** calling
+`onInterrupt()`, then re-bind later. Two compounding bugs turned that into
+permanent stale state:
+
+1. `onServiceConnected()` early-returned when `mInitialized` was still
+   `true` (left over from the dead incarnation), skipping
+   `setServiceInfo()` reconfiguration — so the new instance wasn't fully
+   wired and `performGlobalAction()` returned `false` silently.
+2. No `onUnbind()` override, so the statics were never reset on unbind →
+   `performAction()` kept dispatching to a dead instance.
+
+Patch (`apktool/smali/com/noname81/lmt/AccessibilityHandler.smali`):
+- Removed the `if-eqz mInitialized → return` guard in
+  `onServiceConnected()`; it now always rebuilds `AccessibilityServiceInfo`,
+  calls `setServiceInfo()`, and re-points the statics on every connect.
+  `setServiceInfo()` is idempotent, so this is safe.
+- Added an `onUnbind(Landroid/content/Intent;)Z` override that clears
+  `instance = null` and `mInitialized = false` and returns `false` (default
+  rebind semantics → next bind goes through the now-unguarded
+  `onServiceConnected`). Between unbind and rebind, `performAction()`
+  short-circuits on `mInitialized == false` instead of calling
+  `performGlobalAction()` on a dead instance.
+
+This is why toggling accessibility off/on in settings "fixed" it for a
+while: that path calls `onServiceConnected` cleanly with
+`mInitialized == false`, properly reconfiguring the service — until the
+next unbind/rebind. Full root-cause + fix in `CHANGELOG.md` (2026-07-04).
+
 ---
 
 ## 12. For the next agent: documentation maintenance

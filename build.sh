@@ -28,7 +28,7 @@ for arg in "$@"; do
   esac
 done
 
-REPO_ROOT="$HOME/Syncthing/Scripts/OpenCode/LMT_decompiled"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APKTOOL_DIR="${REPO_ROOT}/apktool"
 KEYSTORE_DIR="${REPO_ROOT}/keystore"
 KEYSTORE="${KEYSTORE_DIR}/release-keystore.jks"

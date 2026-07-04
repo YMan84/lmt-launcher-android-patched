@@ -7,6 +7,74 @@ Base: `LMT v3.4 beta2.apk` (jadx 1.5.5 + apktool 3.0.2 decompilation).
 
 ---
 
+## 2026-07-04 — Fix: accessibility back/recents stop working on aggressive ROMs (Honor Magic UI / Xiaomi HyperOS)
+
+### Fixed — Accessibility service goes stale after ROM kills/rebinds it
+
+**Motivation.** A user on a Honor Magic V5 (Magic UI, reported also against
+the stock `3.4 beta2` build) reports that the Back and Recent-apps actions
+silently stop working at least once a day, and the only remedy is to toggle
+LMT's accessibility service off/on in system settings. This is the classic
+"aggressive ROM kills background accessibility services" failure mode, but
+the app's `AccessibilityHandler` had a latent bug that turned a recoverable
+unbind/rebind into a permanent stale state.
+
+**Root cause.** `AccessibilityHandler` keeps its live instance in two
+`static` fields, `instance` and `mInitialized` (smali lines 11 & 13). These
+are only ever cleared in `onInterrupt()` (smali `onInterrupt`, .line 101-102).
+Android does **not** guarantee `onInterrupt()` is called when it unbinds an
+accessibility service under memory pressure — on MIUI/HyperOS and Magic UI
+the system can unbind and re-bind the service without ever calling
+`onInterrupt`. Two compounding bugs then produced the silent failure:
+
+1. **Stale-`mInitialized` early-return.** `onServiceConnected()` (smali
+   .line 86) started with `if (mInitialized) { instance = this; return; }`,
+   which meant that *if* `mInitialized` happened to still be `true` from the
+   dead incarnation (because `onInterrupt` was never called), the freshly
+   re-created service would skip `setServiceInfo()` reconfiguration entirely
+   and just repoint the static `instance` at itself. `performGlobalAction()`
+   on a not-fully-wired service returns `false` → Back/Recents silently no-op.
+
+2. **No `onUnbind()` override.** The framework's default `onUnbind` does
+   nothing to the app's static state, so when the ROM unbinds the service the
+   `instance` reference is left dangling and `mInitialized` stays `true`.
+   `AccessibilityHandler.performAction()` then dispatches
+   `performGlobalAction()` to a dead/released instance, which returns `false`
+   silently (the debug-log path is the only place that observes it).
+
+**Fix.** `apktool/smali/com/noname81/lmt/AccessibilityHandler.smali`:
+
+- `onServiceConnected()` — removed the `if-eqz mInitialized → return` guard
+  block (.line 86-87). The method now unconditionally rebuilds the
+  `AccessibilityServiceInfo`, calls `setServiceInfo()`, refreshes the
+  `NotificationDataHelper` reference, and re-points `instance`/`mInitialized`.
+  `setServiceInfo()` is idempotent, so re-configuring on every connect is
+  safe and ensures the service is always fully wired regardless of prior
+  state.
+
+- Added an `onUnbind(Landroid/content/Intent;)Z` override that clears
+  `instance = null` and `mInitialized = false`, and returns `false` (default
+  rebind semantics — the next bind goes through `onServiceConnected`, which
+  is what we want now that the guard is gone). This guarantees that a
+  kill/rebind cycle always runs the full init path, and that between unbind
+  and rebind `performAction()` short-circuits on `mInitialized == false`
+  instead of calling `performGlobalAction()` on a dead instance.
+
+**Files touched:**
+- `apktool/smali/com/noname81/lmt/AccessibilityHandler.smali`
+
+**Why a ROM-specific report.** Stock AOSP keeps accessibility services alive
+far more leniently, so `onInterrupt` is the path actually exercised and the
+stale-state bug never surfaces. The Honor Magic UI / Xiaomi HyperOS kernel
+aggressively reclaims background service processes, which is what triggers
+the unbind-without-`onInterrupt` path here. The bug is in LMT either way;
+the ROM just exposes it. This also explains why toggling accessibility
+off/on in settings "fixes" it for a while: that flow does call
+`onServiceConnected` cleanly (with `mInitialized == false` after the disable),
+so the service gets properly reconfigured — until the next unbind/rebind.
+
+---
+
 ## 2026-07-01 (later) — Feature: reorder main-activity tabs (Info last)
 
 ### Added — Move Info tab to the end, PIE to the middle
