@@ -495,30 +495,41 @@
     return-void
 .end method
 
+# Intentionally empty. onInterrupt() only means "stop emitting accessibility
+# feedback right now" -- the service stays bound and fully usable afterwards.
+# It is delivered through the public AccessibilityManager.interrupt(), which any
+# app may call and which the framework broadcasts to every bound service (apps
+# do this before recording audio so a screen reader does not talk into the
+# recording). Clearing the statics here left the service permanently dead: only
+# onServiceConnected() can set mInitialized back to true, and that fires solely
+# on a NEW binding -- hence "toggle accessibility off and on" being the only
+# known cure. See CHANGELOG for the full analysis.
 .method public onInterrupt()V
-    .locals 1
-
-    const/4 v0, 0x0
-
-    .line 101
-    sput-object v0, Lcom/noname81/lmt/AccessibilityHandler;->instance:Lcom/noname81/lmt/AccessibilityHandler;
-
-    const/4 v0, 0x0
-
-    .line 102
-    sput-boolean v0, Lcom/noname81/lmt/AccessibilityHandler;->mInitialized:Z
+    .locals 0
 
     return-void
 .end method
 
+# Guarded with "is this still my own instance?". On a forced rebind the old
+# instance's onUnbind can arrive AFTER the new instance's onServiceConnected;
+# clearing unconditionally would then mark a freshly initialised, working
+# service as unavailable, with no path back (onServiceConnected will not fire
+# again for the already-connected new instance).
 .method public onUnbind(Landroid/content/Intent;)Z
     .locals 1
+
+    sget-object v0, Lcom/noname81/lmt/AccessibilityHandler;->instance:Lcom/noname81/lmt/AccessibilityHandler;
+
+    if-ne v0, p0, :cond_0
 
     const/4 v0, 0x0
 
     sput-object v0, Lcom/noname81/lmt/AccessibilityHandler;->instance:Lcom/noname81/lmt/AccessibilityHandler;
 
     sput-boolean v0, Lcom/noname81/lmt/AccessibilityHandler;->mInitialized:Z
+
+    :cond_0
+    const/4 v0, 0x0
 
     return v0
 .end method

@@ -7,6 +7,127 @@ Base: `LMT v3.4 beta2.apk` (jadx 1.5.5 + apktool 3.0.2 decompilation).
 
 ---
 
+## 2026-08-15 — Fix: accessibility dies permanently whenever any app calls `AccessibilityManager.interrupt()`
+
+### Fixed — `onInterrupt()` treated a feedback interrupt as service destruction
+
+**Relationship to the 2026-07-04 entry below.** That entry correctly notes that
+Android does *not* guarantee `onInterrupt()` is called on unbind, and fixes the
+resulting stale-state paths. This entry addresses the mirror-image case, which
+turns out to be the common one in practice: `onInterrupt()` **is** called, very
+often, with the service still perfectly alive — and the old body then destroyed
+its own binding state. The two fixes are complementary; neither subsumes the
+other.
+
+**Symptom.** Back / Recents / Home stop working after some unrelated action —
+sending a voice message in a chat app, an alarm going off. The system still
+reports the service as enabled and bound, the process is still alive, LMT still
+logs `Fire action type: Back`, and nothing happens. Only toggling the service
+off and on in Settings restores it. This matches the long-standing reports on
+XDA, including several that predate the ROM-unbind analysis:
+
+- [post-90409321](https://xdaforums.com/t/app-root-lmt-launcher-v3-2.1330150/post-90409321)
+  — "Whenever a voice message is sent via WeChat, accessibility features
+  immediately cease to function (though the system remains authorised)"
+- [post-90652663](https://xdaforums.com/t/app-root-lmt-launcher-v3-2.1330150/post-90652663)
+  — "I have found the reason why I have to disable and enable back the
+  accessibility: It happens when my alarm clock rings"
+- [post-90522542](https://xdaforums.com/t/app-root-lmt-launcher-v3-2.1330150/post-90522542)
+  — "Android will show that the app has accessibility enabled, but it's not
+  actually" (Pixel, stock Android 16 — no aggressive ROM involved)
+- [post-87282901](https://xdaforums.com/t/app-root-lmt-launcher-v3-2.1330150/post-87282901)
+  — "LMT's info page shows accessibility as false even when the system shows it
+  as granted"
+
+**Root cause.** `onInterrupt()` does not mean the service was unbound or
+destroyed. Per the AOSP contract it means only *"stop emitting accessibility
+feedback right now"*; the instance stays bound and fully usable after the
+callback returns. It is delivered through the **public**
+`AccessibilityManager.interrupt()`, which any application may call and which the
+framework broadcasts to **every** bound accessibility service. Apps legitimately
+call it before recording audio, so that a screen reader does not talk into the
+recording — which is exactly what a chat app does when you record a voice
+message, and what the clock app does when an alarm fires.
+
+The old body cleared both statics unconditionally:
+
+```java
+public void onInterrupt() {
+    instance = null;
+    mInitialized = false;
+}
+```
+
+After that, `isAccessibilityAvailable()` (which tests
+`mInitialized && instance != null`) returns false forever, and
+`performAction()` returns before reaching `performGlobalAction()`. Nothing in
+the class can set `mInitialized` back to true except `onServiceConnected()`,
+and that only fires when a **new** binding is created — which is precisely why
+"toggle it off and on in Settings" is the only cure users ever found.
+
+This also explains why two seemingly unrelated triggers (voice message, alarm)
+both do it, and why it reproduces on stock Pixel where no ROM is killing
+anything: neither involves memory pressure at all, they simply both call
+`interrupt()`.
+
+**Fix.** `apktool/smali/com/noname81/lmt/AccessibilityHandler.smali`:
+
+1. `onInterrupt()` — now intentionally empty (`.locals 0`, bare `return-void`).
+   A feedback interrupt must not alter binding state. Note that adding an
+   `if (instance == this)` guard *here* would accomplish nothing: `onInterrupt`
+   is dispatched on the live instance, so that condition is always true.
+2. `onUnbind(Intent)Z` — kept, but the clear is now guarded by
+   `if (instance == this)`. Unbinding is the right place to drop the statics,
+   but only when they still refer to this instance: on a forced rebind the old
+   instance's `onUnbind` can arrive *after* the new instance's
+   `onServiceConnected`, and an unconditional clear would then mark a freshly
+   initialised, working service as unavailable with no path back. Register
+   layout is unchanged (`.locals 1`, returns `false` as before).
+
+**Verified on-device** (Pixel 8 Pro `husky`, Android 17 `CP2A.260805.005`,
+SDK 37, LMT v3.11):
+
+- *Reproduction, unpatched.* `dumpsys accessibility` polled once per second
+  across the failure showed LMT continuously present in `Bound services`
+  (`capabilities=32`), `Crashed services:{}`, and an unchanging PID — the
+  service was never unbound and the process never died, ruling out the
+  ROM-kill path for this particular failure. logcat shows the app firing
+  actions into the void, three retries within 1.2 s as the user re-tried a
+  dead gesture:
+  ```
+  17:17:34.164 MediaFocusControl: requestAudioFocus() ... callingPack=com.tencent.mm
+  17:17:37.224 MediaFocusControl: abandonAudioFocus() ... callingPack=com.tencent.mm
+  17:17:44.349 D LMT::Launcher: Fire action type: Back, string: none
+  17:17:45.030 D LMT::Launcher: Fire action type: Back, string: none
+  17:17:45.549 D LMT::Launcher: Fire action type: Back, string: none
+  ```
+  Recovery correlates exactly with the Settings toggle (`bound` 1 → 0 → 1 at
+  17:18:07–08, PID unchanged), i.e. with a new binding being created.
+- *Patched build.* Rebuilt from this tree, installed, then
+  `IAccessibilityManager.interrupt(0)` invoked directly over binder from a small
+  `app_process` helper — reproducing the trigger without involving any chat app.
+  Gestures kept working afterwards; the pie menu and all bound actions remained
+  functional.
+
+**Scope note**, to avoid overclaiming: the chain
+`interrupt() → onInterrupt() → statics cleared → dead service` is established
+from the decompiled code plus the on-device traces above. That a chat app calls
+`interrupt()` *specifically while recording* is an inference — the
+`IAccessibilityServiceClient` trace that would show the call directly produces
+no output file on Android 17 (`/data/misc/a11ytrace/` stays empty even with
+`cmd accessibility start-trace` and root). The correctness of the fix does not
+depend on which app makes the call: clearing binding state in response to a
+feedback interrupt is wrong regardless of the caller.
+
+**Files touched:**
+- `apktool/smali/com/noname81/lmt/AccessibilityHandler.smali` — `onInterrupt()`
+  and `onUnbind()` only.
+
+The `jadx/` reference tree is left untouched, consistent with how the
+2026-07-04 change was landed.
+
+---
+
 ## 2026-07-04 — Fix: accessibility back/recents stop working on aggressive ROMs (Honor Magic UI / Xiaomi HyperOS)
 
 ### Fixed — Accessibility service goes stale after ROM kills/rebinds it
