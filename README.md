@@ -1,3 +1,6 @@
+# NOTE:
+Please check out https://github.com/Psycoguana/LMT-Launcher-Revived for an expanded and more useful fork of the Original LMT Launcher project.
+
 # LMT Launcher — Decompiled and Patched
 
 Decompiled from [LMT v3.4 beta2](https://xdaforums.com/t/app-root-lmt-launcher-v3-2.1330150/page-739#post-90409593) using `jadx 1.5.5` (Java sources) and `apktool 3.0.2` (resources + smali). 
